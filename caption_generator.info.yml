@@ -1,0 +1,23 @@
+name: Image Caption Generator
+description: 'Automatically generates smart captions for the images only in V1 using external API'
+package: custom
+
+type: module
+core_version_requirement: ^11
+
+dependencies:
+  - drupal:file
+  - drupal:image
+  # - drupal:views
+  # - webform:webform (>=6.1.0)
+
+# test_dependencies:
+#  - drupal:image
+
+# configure: hello_world.settings
+# configure_parameters:
+  # enabledFeature: false
+
+# php: 8.2 #skipable if our module supports the same versions of PHP that Drupal core supports
+
+#DrupalCI - Add composer.json later to for tests

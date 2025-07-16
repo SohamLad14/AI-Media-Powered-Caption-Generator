@@ -1,0 +1,190 @@
+<?php
+
+use Drupal\Core\Form\FormStateInterface;
+
+/**
+ * Implements hook_page_attachments().
+ */
+function caption_generator_page_attachments(array &$attachments) {
+  // Add a simple test to see if module is loading
+  if (\Drupal::currentUser()->hasPermission('administer site configuration')) {
+    \Drupal::messenger()->addMessage('Caption Generator module is loaded!');
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for article forms.
+ */
+function caption_generator_form_node_article_form_alter(array &$form, FormStateInterface $form_state, $form_id) {
+  // Add debugging to see if hook is triggered
+  \Drupal::messenger()->addMessage('Caption Generator: Form alter hook triggered for ' . $form_id);
+  
+  $image_field = 'field_image';
+
+  // Add a new details group to the sidebar vertical tabs.
+  $form['caption_generator_settings'] = [
+    '#type' => 'details',
+    '#title' => t('Caption Generating Settings'),
+    '#group' => 'advanced', // Attach to the right sidebar vertical tabs
+    '#weight' => 100,
+    '#open' => TRUE,
+  ];
+
+  // Add the caption length field to the new group.
+  $form['caption_generator_settings']['caption_length'] = [
+    '#type' => 'number',
+    '#title' => t('Caption Length'),
+    '#description' => t('Maximum length for the generated caption.'),
+    '#default_value' => 50,
+    '#min' => 10,
+    '#max' => 200,
+    '#weight' => 0,
+  ];
+
+  // Add a hidden field to store the generated caption value.
+  $form['caption_generator_settings']['generated_caption_value'] = [
+    '#type' => 'hidden',
+    '#default_value' => '',
+  ];
+
+  // Remove the old caption_length field from the image field if it exists.
+  if (isset($form[$image_field]['caption_length'])) {
+    unset($form[$image_field]['caption_length']);
+  }
+
+  // Add our custom elements after the image field
+  $form[$image_field]['generate_caption'] = [
+    '#type' => 'textfield',
+    '#title' => t('Image Caption'),
+    '#description' => t('Auto-generated image caption will appear here.'),
+    '#attributes' => ['id' => ['generated-caption']],
+    '#prefix' => '<div id="generated-caption">',
+    '#suffix' => '</div>',
+    '#weight' => 10, // Place after the image field
+    '#disabled' => TRUE, // Make it read-only
+  ];
+
+  $form[$image_field]['caption_button'] = [
+    '#type' => 'button',
+    '#value' => t('Generate Caption'),
+    '#ajax' => [
+      'callback' => 'caption_generator_ajax_generate_caption',
+      'wrapper' => 'generated-caption',
+      'method' => 'replace',
+      'effect' => 'fade',
+    ],
+    '#weight' => 11, // Place after the caption field
+    '#attributes' => [
+      'class' => ['button', 'button--primary'],
+    ],
+  ];
+  
+  // Add debug message
+  $form['caption_debug'] = [
+    '#markup' => '<div style="color: green; background: #f0f0f0; padding: 10px; margin: 10px 0;">Caption Generator: Fields added successfully!</div>',
+    '#weight' => 12,
+  ];
+}
+
+/**
+ * AJAX callback to fetch caption from external API.
+ */
+function caption_generator_ajax_generate_caption(array &$form, FormStateInterface $form_state) {
+  $image_field = 'field_image';
+  
+  // Get the image field value - handle different possible structures
+  $image_values = $form_state->getValue($image_field);
+  $file = null;
+  
+  if (is_array($image_values) && isset($image_values[0])) {
+    $file = $image_values[0];
+  } elseif (is_array($image_values) && isset($image_values['fids'])) {
+    $file = $image_values;
+  }
+  
+  // Get caption length
+  $length = $form_state->getValue([$image_field, 'caption_length']) ?? 50;
+
+  if ($file && isset($file['fids'][0])) {
+    $fid = $file['fids'][0];
+    $file_entity = \Drupal\file\Entity\File::load($fid);
+    
+    if (!$file_entity) {
+      \Drupal::logger('caption_generator')->error('File entity not found for fid: @fid', ['@fid' => $fid]);
+      $form[$image_field]['generate_caption']['#value'] = 'Error: File not found.';
+      return $form[$image_field]['generate_caption'];
+    }
+    
+    $image_path = \Drupal::service('file_system')->realpath($file_entity->getFileUri());
+    
+    if (!$image_path || !file_exists($image_path)) {
+      \Drupal::logger('caption_generator')->error('Image file not found at path: @path', ['@path' => $image_path]);
+      $form[$image_field]['generate_caption']['#value'] = 'Error: Image file not found.';
+      return $form[$image_field]['generate_caption'];
+    }
+
+    // Debug logging
+    \Drupal::logger('caption_generator')->info('AJAX callback triggered with image: @image, length: @length', [
+      '@image' => $image_path,
+      '@length' => $length,
+    ]);
+
+    try {
+      // Use the PythonApiService which has multiple fallback methods
+      $caption_service = \Drupal::service('caption_generator.python_api');
+      $caption = $caption_service->generateCaption($image_path, $length);
+      
+      // Debug logging
+      \Drupal::logger('caption_generator')->info('Generated caption: @caption', [
+        '@caption' => $caption,
+      ]);
+      
+      $form[$image_field]['generate_caption']['#value'] = $caption;
+      // Set the hidden field value using AJAX
+      $response = new \Drupal\Core\Ajax\AjaxResponse();
+      $caption_html = \Drupal::service('renderer')->renderPlain($form[$image_field]['generate_caption']);
+      $response->addCommand(new \Drupal\Core\Ajax\HtmlCommand('#generated-caption', $caption_html));
+      // Set the hidden field value
+      $response->addCommand(new \Drupal\Core\Ajax\InvokeCommand('input[name="generated_caption_value"]', 'val', [$caption]));
+      return $response;
+    } catch (\Exception $e) {
+      \Drupal::logger('caption_generator')->error('Exception during caption generation: @error', [
+        '@error' => $e->getMessage(),
+        '@trace' => $e->getTraceAsString(),
+      ]);
+      $form[$image_field]['generate_caption']['#value'] = 'Error: ' . $e->getMessage();
+    }
+  } else {
+    \Drupal::logger('caption_generator')->warning('No image selected or invalid image data: @data', [
+      '@data' => print_r($image_values, TRUE),
+    ]);
+    $form[$image_field]['generate_caption']['#value'] = 'No image selected.';
+  }
+
+  // Instead of returning the form element, return an AjaxResponse with HtmlCommand
+  \Drupal::moduleHandler()->loadInclude('core', 'php', 'includes/ajax.inc');
+  $response = new \Drupal\Core\Ajax\AjaxResponse();
+  $caption_html = \Drupal::service('renderer')->renderPlain($form[$image_field]['generate_caption']);
+  $response->addCommand(new \Drupal\Core\Ajax\HtmlCommand('#generated-caption', $caption_html));
+  return $response;
+}
+
+/**
+ * Implements hook_node_presave().
+ * Save the generated caption to the field_image_caption field on article nodes.
+ */
+function caption_generator_node_presave(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity->getEntityTypeId() === 'node' && $entity->bundle() === 'article') {
+    $request = \Drupal::request();
+    $generated_caption = $request->request->get('generated_caption_value');
+    if ($generated_caption) {
+      $entity->set('field_image_caption', $generated_caption);
+    }
+  }
+}
+
+
+
+
+
+
